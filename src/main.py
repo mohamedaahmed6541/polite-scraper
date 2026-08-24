@@ -31,5 +31,50 @@ def fetch(url, cache_filename):
     return html
 
 
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+import time
+
+CATALOGUE_BASE = "https://books.toscrape.com/catalogue/page-{}.html"
+
+
+def discover_book_urls():
+    all_urls = []
+    page_num = 1
+    catalogue_pages = 0
+    MAX_PAGES = 3
+
+    while page_num <= MAX_PAGES:
+        page_url = CATALOGUE_BASE.format(page_num)
+        try:
+            html = fetch(page_url, f"catalogue-page-{page_num}.html")
+        except RuntimeError:
+            break
+
+        catalogue_pages += 1
+        soup = BeautifulSoup(html, "html.parser")
+
+        book_links = soup.select("h3 a")
+        for link in book_links:
+            href = link.get("href")
+            absolute = urljoin(page_url, href)
+            all_urls.append(absolute)
+
+        next_link = soup.select_one("li.next a")
+        if next_link and page_num < MAX_PAGES:
+            time.sleep(0.5)
+            page_num += 1
+        else:
+            break
+
+    unique_urls = list(dict.fromkeys(all_urls))
+
+    print(f"catalogue_pages={catalogue_pages}")
+    print(f"discovered={len(all_urls)}")
+    print(f"unique_urls={len(unique_urls)}")
+
+    return unique_urls
+
+
 if __name__ == "__main__":
-    fetch(BASE_URL, "catalogue-page-1.html")
+    urls = discover_book_urls()
