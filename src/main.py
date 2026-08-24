@@ -171,8 +171,110 @@ def validate_and_store(raw_records):
 
     return valid, errors
 
-if __name__ == "__main__":
+def fetch_with_retry(url, cache_filename, max_retries=1):
+    for attempt in range(max_retries + 1):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            cache_path = os.path.join(CACHE_DIR, cache_filename)
+
+            if os.path.exists(cache_path):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    html = f.read()
+                print(f"CACHE HIT {url} ({len(html)} bytes)")
+                return html
+
+            headers = {"User-Agent": USER_AGENT}
+            response = requests.get(url, headers=headers, timeout=TIMEOUT)
+
+            if response.status_code == 200:
+                html = response.text
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                print(f"FETCH {url} ({len(html)} bytes)")
+                return html
+
+            if response.status_code in (404, 403):
+                raise RuntimeError(f"{response.status_code} — not retrying: {url}")
+
+            if response.status_code >= 500 and attempt < max_retries:
+                time.sleep(1)
+                continue
+
+            raise RuntimeError(f"Failed fetch: {url} returned {response.status_code}")
+
+        except requests.Timeout:
+            if attempt < max_retries:
+                time.sleep(1)
+                continue
+            raise RuntimeError(f"Timeout: {url}")
+
+    raise RuntimeError(f"Exhausted retries: {url}")
+
+
+def extract_book_safe(url):
+    try:
+        filename = url.rstrip("/").split("/")[-2] + ".html"
+        html = fetch_with_retry(url, filename)
+        soup = BeautifulSoup(html, "html.parser")
+
+        product_area = soup.select_one("div.product_main")
+        title = product_area.select_one("h1").get_text(strip=True)
+        price_text = product_area.select_one("p.price_color").get_text(strip=True)
+        availability_text = product_area.select_one("p.availability").get_text(strip=True)
+
+        rating_tag = product_area.select_one("p.star-rating")
+        rating_text = rating_tag["class"][1] if rating_tag else None
+
+        desc_tag = soup.select_one("#product_description ~ p")
+        description = desc_tag.get_text(strip=True) if desc_tag else None
+
+        return {
+            "title": title,
+            "product_url": url,
+            "price_text": price_text,
+            "availability_text": availability_text,
+            "rating_text": rating_text,
+            "description": description,
+            "source_page": url,
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+
+def run():
+    start = time.time()
     urls = discover_book_urls()
-    raw_records = extract_all(urls)
+
+    # Uncomment this line to test failure handling on purpose:
+    # urls.append("https://books.toscrape.com/catalogue/fake-book-9999/index.html")
+
+    raw_records = []
+    failed_pages = 0
+    for url in urls:
+        record, error = extract_book_safe(url)
+        if record:
+            raw_records.append(record)
+        else:
+            failed_pages += 1
+            print(f"SKIPPED {url}: {error}")
+        time.sleep(0.5)
+
     valid, errors = validate_and_store(raw_records)
-    print(f"valid={len(valid)} invalid={len(errors)}")
+
+    report = {
+        "start_time": datetime.fromtimestamp(start, tz=timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - start, 2),
+        "pages_fetched": len(urls),
+        "valid_records": len(valid),
+        "invalid_records": len(errors),
+        "failed_pages": failed_pages,
+    }
+
+    with open("output/run-report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    print(report)
+
+if __name__ == "__main__":
+    run()
