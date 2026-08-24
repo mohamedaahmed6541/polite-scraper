@@ -1,6 +1,9 @@
 import os
 import requests
 from datetime import datetime, timezone
+import json
+import re
+from pydantic import BaseModel, ValidationError, field_validator
 USER_AGENT = "FlyRankInternshipA9/1.0 (https://github.com/mohamedaahmed6541/polite-scraper)"
 TIMEOUT = 10
 CACHE_DIR = "cache"
@@ -116,6 +119,60 @@ def extract_all(urls):
     print(f"detail_pages={len(records)}")
     return records
 
+class BookRecord(BaseModel):
+    title: str
+    product_url: str
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: str | None
+    description: str | None
+    source_page: str
+    fetched_at: str
+
+    @field_validator("product_url", "source_page")
+    @classmethod
+    def must_be_https(cls, v):
+        if not v.startswith("https://"):
+            raise ValueError("URL must start with https://")
+        return v
+
+
+def normalize(raw_record):
+    price_match = re.search(r"[\d.]+", raw_record["price_text"])
+    price_gbp = float(price_match.group()) if price_match else None
+    return {**raw_record, "price_gbp": price_gbp}
+
+
+def validate_and_store(raw_records):
+    seen_urls = set()
+    valid = []
+    errors = []
+
+    for raw in raw_records:
+        normalized = normalize(raw)
+
+        if normalized["product_url"] in seen_urls:
+            continue
+        seen_urls.add(normalized["product_url"])
+
+        try:
+            record = BookRecord(**normalized)
+            valid.append(record.model_dump())
+        except ValidationError as e:
+            errors.append({"record": normalized, "reason": str(e)})
+
+    os.makedirs("output", exist_ok=True)
+    with open("output/books.json", "w", encoding="utf-8") as f:
+        json.dump(valid, f, indent=2)
+
+    with open("output/errors.json", "w", encoding="utf-8") as f:
+        json.dump(errors, f, indent=2)
+
+    return valid, errors
+
 if __name__ == "__main__":
     urls = discover_book_urls()
     raw_records = extract_all(urls)
+    valid, errors = validate_and_store(raw_records)
+    print(f"valid={len(valid)} invalid={len(errors)}")
